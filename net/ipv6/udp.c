@@ -460,9 +460,10 @@ try_again:
 						    inet6_iif(skb));
 		}
 		*addr_len = sizeof(*sin6);
+
 		if (cgroup_bpf_enabled)
 			BPF_CGROUP_RUN_PROG_UDP6_RECVMSG_LOCK(sk,
-						(struct sockaddr *)sin6);			
+						(struct sockaddr *)sin6);
 	}
 
 	if (udp_sk(sk)->gro_enabled)
@@ -598,7 +599,7 @@ static __inline__ void udpv6_err(struct sk_buff *skb,
 static struct static_key udpv6_encap_needed __read_mostly;
 void udpv6_encap_enable(void)
 {
-	static_key_enable(&udpv6_encap_needed);
+	static_key_slow_inc(&udpv6_encap_needed);
 }
 EXPORT_SYMBOL(udpv6_encap_enable);
 
@@ -1354,7 +1355,10 @@ do_udp_sendmsg:
 		opt->tot_len = sizeof(*opt);
 		ipc6.opt = opt;
 
-		err = ip6_datagram_send_ctl(sock_net(sk), sk, msg, &fl6, &ipc6, &sockc);
+		err = udp_cmsg_send(sk, msg, &ipc6.gso_size);
+		if (err > 0)
+			err = ip6_datagram_send_ctl(sock_net(sk), sk, msg, &fl6,
+						    &ipc6, &sockc);
 		if (err < 0) {
 			fl6_sock_release(flowlabel);
 			return err;
@@ -1385,6 +1389,29 @@ do_udp_sendmsg:
 	if (ipv6_addr_any(&fl6.saddr) && !ipv6_addr_any(&np->saddr))
 		fl6.saddr = np->saddr;
 	fl6.fl6_sport = inet->inet_sport;
+
+	if (cgroup_bpf_enabled && !connected) {
+		err = BPF_CGROUP_RUN_PROG_UDP6_SENDMSG_LOCK(sk,
+					   (struct sockaddr *)sin6, &fl6.saddr);
+		if (err)
+			goto out_no_dst;
+		if (sin6) {
+			if (ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+				/* BPF program rewrote IPv6-only by IPv4-mapped
+				 * IPv6. It's currently unsupported.
+				 */
+				err = -ENOTSUPP;
+				goto out_no_dst;
+			}
+			if (sin6->sin6_port == 0) {
+				/* BPF program set invalid port. Reject it. */
+				err = -EINVAL;
+				goto out_no_dst;
+			}
+			fl6.fl6_dport = sin6->sin6_port;
+			fl6.daddr = sin6->sin6_addr;
+		}
+	}
 
 	final_p = fl6_update_dst(&fl6, opt, &final);
 	if (final_p)
@@ -1482,6 +1509,7 @@ release_dst:
 
 out:
 	dst_release(dst);
+out_no_dst:
 	fl6_sock_release(flowlabel);
 	txopt_put(opt_to_free);
 	if (!err)
@@ -1518,11 +1546,15 @@ void udpv6_destroy_sock(struct sock *sk)
 	udp_v6_flush_pending_frames(sk);
 	release_sock(sk);
 
-	if (static_key_false(&udpv6_encap_needed) && up->encap_type) {
-		void (*encap_destroy)(struct sock *sk);
-		encap_destroy = ACCESS_ONCE(up->encap_destroy);
-		if (encap_destroy)
-			encap_destroy(sk);
+	if (static_key_false(&udpv6_encap_needed)) {
+		if (up->encap_type) {
+			void (*encap_destroy)(struct sock *sk);
+			encap_destroy = ACCESS_ONCE(up->encap_destroy);
+			if (encap_destroy)
+				encap_destroy(sk);
+		}
+		if (up->encap_enabled)
+			static_key_slow_dec(&udpv6_encap_needed);
 	}
 }
 
