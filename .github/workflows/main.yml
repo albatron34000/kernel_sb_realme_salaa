@@ -9,7 +9,7 @@ on:
         default: 'salaa'
       MANIFEST_BRANCH:
         required: true
-        default: 'main'
+        default: '14'
 jobs:
   build:
     runs-on: ubuntu-latest
