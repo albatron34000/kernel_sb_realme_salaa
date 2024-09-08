@@ -1713,6 +1713,7 @@ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ar
 extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 				 void *argv, void *envp, int *flags);
 #endif
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1733,7 +1734,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	else
 		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
 #endif
-	
+
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
 
